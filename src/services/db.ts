@@ -1,16 +1,10 @@
-import SQLite, {
-    SQLiteDatabase,
-    ResultSet,
-} from 'react-native-sqlite-storage';
+import { open, type DB } from '@op-engineering/op-sqlite';
 import { Plate, PlateCheckResult } from '../types';
 
-// Enable promise-based API
-SQLite.enablePromise(true);
-
-const DATABASE_NAME = 'PlateScannerDB.db';
+const DATABASE_NAME = 'PlateScannerDB';
 
 class DatabaseService {
-    private db: SQLiteDatabase | null = null;
+    private db: DB | null = null;
     private static instance: DatabaseService;
 
     private constructor() { }
@@ -25,18 +19,17 @@ class DatabaseService {
     /**
      * Initialize the database and create tables if they don't exist
      */
-    public async initDB(): Promise<void> {
+    public initDB(): void {
         try {
             if (this.db) {
                 return; // Already initialized
             }
 
-            this.db = await SQLite.openDatabase({
+            this.db = open({
                 name: DATABASE_NAME,
-                location: 'default',
             });
 
-            await this.db.executeSql(`
+            this.db.executeSync(`
         CREATE TABLE IF NOT EXISTS plates (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           plate_number TEXT UNIQUE NOT NULL,
@@ -58,26 +51,23 @@ class DatabaseService {
      * @param isManual - Whether the plate was entered manually
      * @returns The inserted plate or null if duplicate
      */
-    public async addPlate(
-        plateNumber: string,
-        isManual: boolean,
-    ): Promise<Plate | null> {
+    public addPlate(plateNumber: string, isManual: boolean): Plate | null {
         try {
             if (!this.db) {
-                await this.initDB();
+                this.initDB();
             }
 
             const normalizedPlate = plateNumber.toUpperCase().trim();
             const scanDate = new Date().toISOString();
 
-            const result: [ResultSet] = await this.db!.executeSql(
+            const result = this.db!.executeSync(
                 `INSERT INTO plates (plate_number, scan_date, is_manual) VALUES (?, ?, ?)`,
                 [normalizedPlate, scanDate, isManual ? 1 : 0],
             );
 
-            if (result[0].insertId) {
+            if (result.insertId) {
                 return {
-                    id: result[0].insertId,
+                    id: result.insertId,
                     plate_number: normalizedPlate,
                     scan_date: scanDate,
                     is_manual: isManual,
@@ -89,7 +79,7 @@ class DatabaseService {
             // Handle unique constraint violation (duplicate plate)
             if (
                 error?.message?.includes('UNIQUE constraint failed') ||
-                error?.code === 'SQLITE_CONSTRAINT'
+                error?.message?.includes('SQLITE_CONSTRAINT')
             ) {
                 console.log('Duplicate plate detected:', plateNumber);
                 return null;
@@ -104,21 +94,21 @@ class DatabaseService {
      * @param plateNumber - The license plate number to check
      * @returns PlateCheckResult with exists flag and plate data if found
      */
-    public async checkPlate(plateNumber: string): Promise<PlateCheckResult> {
+    public checkPlate(plateNumber: string): PlateCheckResult {
         try {
             if (!this.db) {
-                await this.initDB();
+                this.initDB();
             }
 
             const normalizedPlate = plateNumber.toUpperCase().trim();
 
-            const result: [ResultSet] = await this.db!.executeSql(
+            const result = this.db!.executeSync(
                 `SELECT id, plate_number, scan_date, is_manual FROM plates WHERE plate_number = ?`,
                 [normalizedPlate],
             );
 
-            if (result[0].rows.length > 0) {
-                const row = result[0].rows.item(0);
+            if (result.rows && result.rows.length > 0) {
+                const row = result.rows[0] as any;
                 return {
                     exists: true,
                     plate: {
@@ -141,25 +131,26 @@ class DatabaseService {
      * Get all plates from the database ordered by scan_date DESC
      * @returns Array of all plates
      */
-    public async getAllPlates(): Promise<Plate[]> {
+    public getAllPlates(): Plate[] {
         try {
             if (!this.db) {
-                await this.initDB();
+                this.initDB();
             }
 
-            const result: [ResultSet] = await this.db!.executeSql(
+            const result = this.db!.executeSync(
                 `SELECT id, plate_number, scan_date, is_manual FROM plates ORDER BY scan_date DESC`,
             );
 
             const plates: Plate[] = [];
-            for (let i = 0; i < result[0].rows.length; i++) {
-                const row = result[0].rows.item(i);
-                plates.push({
-                    id: row.id,
-                    plate_number: row.plate_number,
-                    scan_date: row.scan_date,
-                    is_manual: row.is_manual === 1,
-                });
+            if (result.rows) {
+                for (const row of result.rows as any[]) {
+                    plates.push({
+                        id: row.id,
+                        plate_number: row.plate_number,
+                        scan_date: row.scan_date,
+                        is_manual: row.is_manual === 1,
+                    });
+                }
             }
 
             return plates;
@@ -173,13 +164,13 @@ class DatabaseService {
      * Delete a plate from the database
      * @param id - The plate ID to delete
      */
-    public async deletePlate(id: number): Promise<void> {
+    public deletePlate(id: number): void {
         try {
             if (!this.db) {
-                await this.initDB();
+                this.initDB();
             }
 
-            await this.db!.executeSql(`DELETE FROM plates WHERE id = ?`, [id]);
+            this.db!.executeSync(`DELETE FROM plates WHERE id = ?`, [id]);
         } catch (error) {
             console.error('Failed to delete plate:', error);
             throw error;
@@ -189,10 +180,10 @@ class DatabaseService {
     /**
      * Close the database connection
      */
-    public async closeDB(): Promise<void> {
+    public closeDB(): void {
         try {
             if (this.db) {
-                await this.db.close();
+                this.db.close();
                 this.db = null;
                 console.log('Database closed');
             }

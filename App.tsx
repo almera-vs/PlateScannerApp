@@ -20,9 +20,11 @@ const Stack = createNativeStackNavigator<RootStackParamList>();
 function App(): React.JSX.Element {
   useEffect(() => {
     // Initialize database on app start
-    db.initDB().catch(error => {
+    try {
+      db.initDB();
+    } catch (error) {
       console.error('Failed to initialize database:', error);
-    });
+    }
   }, []);
 
   return (

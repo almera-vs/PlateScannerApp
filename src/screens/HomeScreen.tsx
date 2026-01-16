@@ -45,10 +45,12 @@ export const HomeScreen: React.FC = () => {
 
     useEffect(() => {
         // Initialize database on component mount
-        db.initDB().catch(error => {
+        try {
+            db.initDB();
+        } catch (error) {
             console.error('Failed to initialize DB:', error);
             Alert.alert('Błąd', 'Nie udało się zainicjować bazy danych');
-        });
+        }
     }, []);
 
     const validatePlate = useCallback((text: string): string | null => {

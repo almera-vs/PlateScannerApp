@@ -25,9 +25,11 @@ export const ManualEntryScreen: React.FC = () => {
     const [error, setError] = useState<string | null>(null);
 
     useEffect(() => {
-        db.initDB().catch(err => {
+        try {
+            db.initDB();
+        } catch (err) {
             console.error('Failed to init DB:', err);
-        });
+        }
     }, []);
 
     const normalizeInput = (text: string): string => {
