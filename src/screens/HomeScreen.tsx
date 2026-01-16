@@ -8,6 +8,7 @@ import {
     Linking,
     ActivityIndicator,
     Dimensions,
+    Image,
 } from 'react-native';
 import {
     Camera,
@@ -15,7 +16,9 @@ import {
     useCameraPermission,
     PhotoFile,
 } from 'react-native-vision-camera';
-import TextRecognition, { TextBlock } from '@react-native-ml-kit/text-recognition';
+import TextRecognition from '@react-native-ml-kit/text-recognition';
+import ImageEditor from '@react-native-community/image-editor';
+import RNFS from 'react-native-fs';
 import { useIsFocused, useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { format } from 'date-fns';
@@ -26,16 +29,18 @@ import { RootStackParamList } from '../types';
 
 type NavigationProp = NativeStackNavigationProp<RootStackParamList, 'Home'>;
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
-const SCAN_FRAME_WIDTH = SCREEN_WIDTH - 60;
-const SCAN_FRAME_HEIGHT = 120;
+const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
-// Strict License Plate Regex (User requested)
-// Format: 2-3 letters, then 4-5 alphanumeric (e.g. WZ12345, DW1A123)
-const STRICT_PLATE_REGEX = /^[A-Z]{2,3}[0-9A-Z]{4,5}$/;
+// Guide Box Dimensions (Centering)
+const GUIDE_BOX_WIDTH_PERCENT = 0.8; // 80%
+const GUIDE_BOX_HEIGHT = 150;
+const GUIDE_BOX_WIDTH = SCREEN_WIDTH * GUIDE_BOX_WIDTH_PERCENT;
 
-// Minimum interval between scans in ms
-const SCAN_DEBOUNCE_MS = 2000;
+// Explicit regex for license plate validation (Offline Mode)
+const STRICT_PLATE_REGEX = /^[A-Z]{2,3}\s?[0-9A-Z]{4,5}$/;
+
+// Interval for "Snapshot" loop
+const SNAPSHOT_INTERVAL_MS = 2000;
 
 export const HomeScreen: React.FC = () => {
     const navigation = useNavigation<NavigationProp>();
@@ -45,274 +50,246 @@ export const HomeScreen: React.FC = () => {
     const isFocused = useIsFocused();
 
     const [isScanning, setIsScanning] = useState(false);
-    const [lastScanTime, setLastScanTime] = useState(0);
-    const [lastScannedPlate, setLastScannedPlate] = useState<string | null>(null);
     const [isProcessing, setIsProcessing] = useState(false);
     const [statusMessage, setStatusMessage] = useState<string>('Naciśnij SKANUJ aby rozpocząć');
+    const [lastScannedPlate, setLastScannedPlate] = useState<string | null>(null);
 
     useEffect(() => {
-        // Initialize database on component mount
+        // Initialize DB
         try {
             db.initDB();
-        } catch (error) {
-            console.error('Failed to initialize DB:', error);
-            Alert.alert('Błąd', 'Nie udało się zainicjować bazy danych');
+        } catch (e) {
+            console.error('DB Init Error', e);
         }
     }, []);
 
-    const processRecognizedText = useCallback(
-        (textBlocks: TextBlock[], photoWidth: number, photoHeight: number): string | null => {
-            // DEBUG: Log image dimensions
-            console.log(`Processing Frame: ${photoWidth}x${photoHeight}`);
-
-            // ROI Constants (Middle 50% of screen)
-            const MIN_Y = photoHeight * 0.25;
-            const MAX_Y = photoHeight * 0.75;
-            const MIN_X = photoWidth * 0.1; // Ignore edges
-            const MAX_X = photoWidth * 0.9;
-
-            for (const block of textBlocks) {
-                if (!block.frame) {
-                    continue;
-                }
-
-                // Log raw block text and coordinates
-                // frame usually has properties: left, top, width, height (or x,y depending on version, checking both safely)
-                const frame: any = block.frame;
-                const x = frame.x ?? frame.left ?? 0;
-                const y = frame.y ?? frame.top ?? 0;
-
-                console.log(`Block: "${block.text}" [${x}, ${y}, ${frame.width}, ${frame.height}]`);
-
-                // 1. Coordinate Filtering (ROI)
-                const midX = x + (frame.width / 2);
-                const midY = y + (frame.height / 2);
-
-                const isCentral = midY > MIN_Y && midY < MAX_Y && midX > MIN_X && midX < MAX_X;
-
-                if (!isCentral) {
-                    console.log(`Skipped block "${block.text}" - Outside ROI`);
-                    continue;
-                }
-
-                // 2. Normalization
-                // Strip everything except A-Z and 0-9
-                const rawText = block.text;
-                const normalized = rawText.toUpperCase().replace(/[^A-Z0-9]/g, '');
-
-                console.log(`Normalized: "${normalized}"`);
-
-                // 3. Strict Regex Matching
-                if (STRICT_PLATE_REGEX.test(normalized)) {
-                    console.log(`MATCH FOUND: ${normalized}`);
-                    return normalized;
-                } else {
-                    // Retry with line splitting if the block contains multiple lines
-                    // (Though usually blocks are paragraphs/lines, ML Kit can return large blocks)
-                    const lines = block.text.split('\n');
-                    for (const line of lines) {
-                        const lineNorm = line.toUpperCase().replace(/[^A-Z0-9]/g, '');
-                        if (STRICT_PLATE_REGEX.test(lineNorm)) {
-                            console.log(`MATCH FOUND (in line): ${lineNorm}`);
-                            return lineNorm;
-                        }
-                    }
-                }
-            }
-            return null;
-        },
-        [],
-    );
-
     const handlePlateDetected = useCallback(
         async (plateNumber: string) => {
-            // Avoid re-processing the same plate repeatedly
-            if (plateNumber === lastScannedPlate) {
-                return;
-            }
+            // Normalize: Remove spaces for DB check/save depending on requirement
+            // Display format: Keep spaces if regex matched with spaces? 
+            // User regex: /^[A-Z]{2,3}\s?[0-9A-Z]{4,5}$/ (optional space)
+            // Let's normalize to no-space for DB consistency
+            const dbPlate = plateNumber.replace(/\s/g, '');
 
-            setLastScannedPlate(plateNumber);
-            setIsScanning(false);
+            if (dbPlate === lastScannedPlate) return;
+
+            setLastScannedPlate(dbPlate);
+            setIsScanning(false); // Stop loop
             setStatusMessage(`Wykryto: ${plateNumber}`);
 
-            // Check if plate exists in database
-            const checkResult = db.checkPlate(plateNumber);
+            try {
+                const checkResult = db.checkPlate(dbPlate);
 
-            if (checkResult.exists && checkResult.plate) {
-                // DUPLICATE - Show RED alert
-                const scanDate = format(
-                    new Date(checkResult.plate.scan_date),
-                    'dd.MM.yyyy HH:mm',
-                    { locale: pl },
-                );
-                Alert.alert(
-                    '⚠️ DUPLIKAT!',
-                    `Tablica ${plateNumber} już istnieje w bazie.\n\nZgłoszony: ${scanDate}`,
-                    [
-                        {
-                            text: 'OK',
-                            onPress: () => {
+                if (checkResult.exists && checkResult.plate) {
+                    const scanDate = format(
+                        new Date(checkResult.plate.scan_date),
+                        'dd.MM.yyyy HH:mm',
+                        { locale: pl },
+                    );
+                    Alert.alert(
+                        '⚠️ DUPLIKAT!',
+                        `Tablica ${plateNumber} już istnieje.\nZgłoszony: ${scanDate}`,
+                        [{
+                            text: 'OK', onPress: () => {
                                 setLastScannedPlate(null);
                                 setStatusMessage('Naciśnij SKANUJ aby kontynuować');
-                            },
-                        },
-                    ],
-                    { cancelable: false },
-                );
-            } else {
-                // NEW PLATE - Ask for confirmation before saving
-                Alert.alert(
-                    '🚗 Nowa tablica',
-                    `Wykryto tablicę: ${plateNumber}\n\nCzy zgłosić pojazd?`,
-                    [
-                        {
-                            text: 'Anuluj',
-                            style: 'cancel',
-                            onPress: () => {
-                                setLastScannedPlate(null);
-                                setStatusMessage('Anulowano. Naciśnij SKANUJ aby kontynuować');
-                            },
-                        },
-                        {
-                            text: 'Zgłoś',
-                            style: 'default',
-                            onPress: () => {
-                                const savedPlate = db.addPlate(plateNumber, false);
-                                if (savedPlate) {
-                                    Alert.alert(
-                                        '✅ ZAPISANO',
-                                        `Tablica ${plateNumber} została zgłoszona.`,
-                                        [
-                                            {
-                                                text: 'OK',
-                                                onPress: () => {
-                                                    setLastScannedPlate(null);
-                                                    setStatusMessage('Zapisano! Naciśnij SKANUJ aby kontynuować');
-                                                },
-                                            },
-                                        ],
-                                    );
-                                } else {
-                                    Alert.alert('Błąd', 'Nie udało się zapisać tablicy.');
+                            }
+                        }],
+                        { cancelable: false }
+                    );
+                } else {
+                    Alert.alert(
+                        '🚗 Nowa tablica',
+                        `Wykryto: ${plateNumber}\nCzy zgłosić?`,
+                        [
+                            {
+                                text: 'Anuluj',
+                                style: 'cancel',
+                                onPress: () => {
                                     setLastScannedPlate(null);
+                                    setStatusMessage('Anulowano.');
                                 }
                             },
-                        },
-                    ],
-                    { cancelable: false },
-                );
+                            {
+                                text: 'Zgłoś',
+                                onPress: () => {
+                                    db.addPlate(dbPlate, false);
+                                    Alert.alert('✅ ZAPISANO', 'Dodano do bazy.', [{
+                                        text: 'OK',
+                                        onPress: () => {
+                                            setLastScannedPlate(null);
+                                            setStatusMessage('Gotowy.');
+                                        }
+                                    }]);
+                                },
+                            },
+                        ],
+                        { cancelable: false },
+                    );
+                }
+            } catch (err) {
+                console.error('DB Error', err);
+                setStatusMessage('Błąd bazy danych');
             }
         },
         [lastScannedPlate],
     );
 
-    const handleCapture = useCallback(async () => {
-        const now = Date.now();
-
-        // Debounce check
-        if (now - lastScanTime < SCAN_DEBOUNCE_MS) {
-            return;
-        }
-
-        if (!camera.current || isProcessing || !isScanning) {
-            return;
-        }
+    const captureAndCrop = useCallback(async () => {
+        if (!camera.current || !isScanning || isProcessing) return;
 
         setIsProcessing(true);
-        setLastScanTime(now);
-        setStatusMessage('Skanowanie...');
+        setStatusMessage('Przetwarzanie...');
+
+        let originalPhotoPath: string | null = null;
+        let croppedPhotoPath: string | null = null;
 
         try {
-            // Take photo
-            const photo: PhotoFile = await camera.current.takePhoto({
+            // A) Snapshot
+            const photo = await camera.current.takePhoto({
                 flash: 'off',
+                enableShutterSound: false, // Try to silence if possible
             });
+            originalPhotoPath = photo.path;
 
-            // Perform OCR using ML Kit
-            const result = await TextRecognition.recognize(`file://${photo.path}`);
+            // B) Calculate Crop
+            // We want the center area corresponding to the Guide Box
+            // Guide Box is vertically centered, height = 150
+            // Guide Box is horizontally centered, width = 80%
 
-            // Process with ROI and Strict Regex
-            const plateNumber = processRecognizedText(result.blocks, photo.width, photo.height);
+            // Image coords
+            const imgW = photo.width;
+            const imgH = photo.height;
 
-            if (plateNumber) {
-                await handlePlateDetected(plateNumber);
-            } else {
-                setStatusMessage('Szukam tablicy...');
+            // Calculate crop region (normalized to image dimensions)
+            // Vertical center:
+            // The Guide Box UI is at screen center.
+            // We assume the camera preview fills the screen (cover).
+            // So the crop area relative to image is proportional to GuideBox relative to Screen.
+
+            // NOTE: Handling aspect ratio differences between Screen and Camera Sensor is complex.
+            // For simplicity, we implement the User's formula: "offset_y = height * 0.4", "height = 0.2"
+            // User Formula:
+            // offset_x = imageWidth * 0.1 (to match 80% width centered)
+            // crop_width = imageWidth * 0.8
+            // offset_y = imageHeight * 0.4 (approx middle)
+            // crop_height = imageHeight * 0.2
+
+            const cropData = {
+                offset: {
+                    x: imgW * ((1 - GUIDE_BOX_WIDTH_PERCENT) / 2), // 10% from left
+                    y: imgH * 0.4, // Start at 40% height
+                },
+                size: {
+                    width: imgW * GUIDE_BOX_WIDTH_PERCENT, // 80% width
+                    height: imgH * 0.2, // 20% height
+                },
+                displaySize: {
+                    width: imgW * GUIDE_BOX_WIDTH_PERCENT,
+                    height: imgH * 0.2
+                },
+                resizeMode: 'contain' as const,
+            };
+
+            // C) Crop
+            const resultObj = await ImageEditor.cropImage(`file://${originalPhotoPath}`, cropData);
+            // ImageEditor returns { path: string, width: number, height: number } or similar depending on version
+            // Checking type defs or docs: It returns Promise<CropResult> which has 'path' or 'uri'
+            // If resultObj is string (some versions), use it. If object, use .path or .uri
+            const uri = (typeof resultObj === 'string') ? resultObj : (resultObj as any).path ?? (resultObj as any).uri;
+            croppedPhotoPath = uri;
+
+            // D) OCR on Cropped Image
+            const result = await TextRecognition.recognize(uri);
+
+            // E) Filter
+            let foundPlate: string | null = null;
+
+            // Check full blocks first
+            for (const block of result.blocks) {
+                const text = block.text.trim().toUpperCase().replace(/[^A-Z0-9]/g, ''); // Basic normalization
+                // Check strict regex
+                // We need to re-verify regex logic. 
+                // If regex allows space /^[A-Z]{2,3}\s?[0-9A-Z]{4,5}$/
+                // Then we shouldn't strip space in temp text completely if we want to match exact regex
+                // But usually trimming non-alphanumeric is safer for noisy OCR.
+                // Let's strip special chars but try to match the pattern structure A-Z then 0-9
+
+                if (STRICT_PLATE_REGEX.test(text)) {
+                    foundPlate = text;
+                    break;
+                }
             }
-        } catch (error) {
-            console.error('Capture/OCR error:', error);
-            setStatusMessage('Błąd skanowania. Spróbuj ponownie.');
+
+            // If not found in blocks, try line by line
+            if (!foundPlate) {
+                // Flatten all text
+                const allText = result.text.toUpperCase().replace(/[^A-Z0-9\s]/g, '');
+                const words = allText.split(/\s+/);
+                for (const w of words) {
+                    if (STRICT_PLATE_REGEX.test(w)) {
+                        foundPlate = w;
+                        break;
+                    }
+                }
+            }
+
+            if (foundPlate) {
+                await handlePlateDetected(foundPlate);
+            } else {
+                // Continue scanning
+                setStatusMessage('Skanowanie...');
+            }
+
+        } catch (err) {
+            console.error('Capture Error', err);
+            setStatusMessage('Błąd kamery');
         } finally {
             setIsProcessing(false);
-        }
-    }, [lastScanTime, isProcessing, isScanning, processRecognizedText, handlePlateDetected]);
 
-    // Controlled scanning - only trigger when user presses button
-    useEffect(() => {
-        let interval: ReturnType<typeof setInterval> | null = null;
-
-        if (isScanning && isFocused && device && hasPermission && !isProcessing) {
-            // Scan every 1.5 seconds while scanning is active
-            interval = setInterval(() => {
-                handleCapture();
-            }, 1500);
-        }
-
-        return () => {
-            if (interval) {
-                clearInterval(interval);
+            // Cleanup
+            if (croppedPhotoPath) {
+                RNFS.unlink(croppedPhotoPath).catch(() => { });
             }
-        };
-    }, [isScanning, isFocused, device, hasPermission, isProcessing, handleCapture]);
+            // Note: originalPhotoPath is managed by Camera lib (cache), usually cleaned up by OS eventually,
+            // but we can delete it if we want to be strict.
+            if (originalPhotoPath) {
+                RNFS.unlink(originalPhotoPath).catch(() => { });
+            }
+        }
+    }, [camera, isScanning, isProcessing, handlePlateDetected]);
 
-    const handleRequestPermission = async () => {
-        const granted = await requestPermission();
-        if (!granted) {
-            Alert.alert(
-                'Wymagane uprawnienia',
-                'Aplikacja wymaga dostępu do kamery. Przejdź do ustawień, aby nadać uprawnienia.',
-                [
-                    { text: 'Anuluj', style: 'cancel' },
-                    { text: 'Ustawienia', onPress: () => Linking.openSettings() },
-                ],
-            );
+    // Interval Loop
+    useEffect(() => {
+        let interval: ReturnType<typeof setInterval>;
+        if (isScanning && !isProcessing && isFocused && hasPermission) {
+            interval = setInterval(() => {
+                captureAndCrop();
+            }, SNAPSHOT_INTERVAL_MS);
+        }
+        return () => clearInterval(interval);
+    }, [isScanning, isProcessing, isFocused, hasPermission, captureAndCrop]);
+
+
+    const toggleScanning = () => {
+        setIsScanning(!isScanning);
+        if (!isScanning) {
+            setLastScannedPlate(null);
+            setStatusMessage('Przygotowanie...');
+        } else {
+            setStatusMessage('Zatrzymano');
         }
     };
 
-    const toggleScanning = useCallback(() => {
-        if (isScanning) {
-            setIsScanning(false);
-            setStatusMessage('Zatrzymano. Naciśnij SKANUJ aby wznowić');
-        } else {
-            setIsScanning(true);
-            setLastScannedPlate(null);
-            setStatusMessage('Skanowanie... skieruj tablicę w ramkę');
-        }
-    }, [isScanning]);
-
-    if (!hasPermission) {
+    if (!device || !hasPermission) {
         return (
             <View style={styles.container}>
-                <View style={styles.permissionContainer}>
-                    <Text style={styles.permissionTitle}>Wymagany dostęp do kamery</Text>
-                    <Text style={styles.permissionText}>
-                        Aby skanować tablice rejestracyjne, aplikacja potrzebuje dostępu do
-                        kamery.
-                    </Text>
-                    <TouchableOpacity
-                        style={styles.permissionButton}
-                        onPress={handleRequestPermission}>
-                        <Text style={styles.permissionButtonText}>Nadaj uprawnienia</Text>
-                    </TouchableOpacity>
-                </View>
-            </View>
-        );
-    }
-
-    if (!device) {
-        return (
-            <View style={styles.container}>
-                <Text style={styles.errorText}>Nie znaleziono kamery</Text>
+                <Text style={{ color: 'white', marginTop: 100, textAlign: 'center' }}>
+                    Brak dostępu do kamery
+                </Text>
+                <TouchableOpacity onPress={requestPermission} style={styles.permButton}>
+                    <Text>Nadaj Uprawnienia</Text>
+                </TouchableOpacity>
             </View>
         );
     }
@@ -325,245 +302,147 @@ export const HomeScreen: React.FC = () => {
                 device={device}
                 isActive={isFocused}
                 photo={true}
-                zoom={device.neutralZoom ? device.neutralZoom * 3 : 3.0} // Zoom 3x to focus on plate
+                // Use user requested zoom strategy: Neutral * 2 or just 2.0
+                // "set the default zoom property to 2.0 (or device.neutralZoom * 2)" from Prompt 1
+                // Prompt 2: "device.neutralZoom * 3"
+                // Prompt 3 (this one): "Refactor... logic". Doesn't explicitly mention zoom change, but implies standard setup.
+                // I will keep 2.0 or 3.0. Let's stick to 2.0 for "Guide Box" strategy (snapshot usually high res).
+                zoom={device.neutralZoom ? device.neutralZoom * 2 : 2.0}
             />
 
-            {/* Overlay */}
             <View style={styles.overlay}>
-                {/* Instructions at top */}
-                <View style={styles.topSection}>
-                    <Text style={styles.instructionText}>
-                        Umieść tablicę rejestracyjną w ramce
-                    </Text>
+
+                {/* Top: Instructions */}
+                <View style={styles.topBar}>
+                    <Text style={styles.titleText}>SPRAWDŹ TABLICE</Text>
+                    <Text style={styles.subText}>Umieść tablicę w ramce</Text>
                 </View>
 
-                {/* Centered scan frame */}
-                <View style={styles.middleSection}>
-                    <View style={styles.scanFrame}>
-                        <View style={[styles.corner, styles.topLeft]} />
-                        <View style={[styles.corner, styles.topRight]} />
-                        <View style={[styles.corner, styles.bottomLeft]} />
-                        <View style={[styles.corner, styles.bottomRight]} />
+                {/* Center: Guide Box */}
+                <View style={styles.centerArea}>
+                    <View style={styles.guideBox}>
+                        {/* Corners */}
+                        <View style={[styles.corner, styles.tl]} />
+                        <View style={[styles.corner, styles.tr]} />
+                        <View style={[styles.corner, styles.bl]} />
+                        <View style={[styles.corner, styles.br]} />
 
-                        {/* Scanning indicator inside frame */}
-                        {isScanning && isProcessing && (
-                            <View style={styles.scanningIndicator}>
-                                <ActivityIndicator color="#3B82F6" size="small" />
-                            </View>
+                        {isProcessing && (
+                            <ActivityIndicator size="large" color="#fff" style={styles.loader} />
                         )}
                     </View>
                 </View>
 
-                {/* Status and controls at bottom */}
-                <View style={styles.bottomSection}>
-                    {/* Status message */}
-                    <View style={styles.statusContainer}>
-                        <Text style={styles.statusText}>{statusMessage}</Text>
-                    </View>
+                {/* Bottom: Controls */}
+                <View style={styles.bottomBar}>
+                    <Text style={styles.statusText}>{statusMessage}</Text>
 
-                    {/* Main scan button */}
                     <TouchableOpacity
-                        style={[
-                            styles.scanButton,
-                            isScanning && styles.scanButtonActive,
-                        ]}
-                        onPress={toggleScanning}>
-                        <Text style={styles.scanButtonText}>
+                        style={[styles.scanBtn, isScanning ? styles.stopBtn : styles.startBtn]}
+                        onPress={toggleScanning}
+                    >
+                        <Text style={styles.scanBtnText}>
                             {isScanning ? 'STOP' : 'SKANUJ'}
                         </Text>
                     </TouchableOpacity>
 
-                    {/* Navigation buttons */}
-                    <View style={styles.navContainer}>
-                        <TouchableOpacity
-                            style={styles.navButton}
-                            onPress={() => navigation.navigate('ManualEntry')}>
-                            <Text style={styles.navButtonText}>✏️ Ręcznie</Text>
+                    <View style={styles.navRow}>
+                        <TouchableOpacity onPress={() => navigation.navigate('ManualEntry')} style={styles.smallBtn}>
+                            <Text style={styles.smallBtnText}>Ręcznie</Text>
                         </TouchableOpacity>
-                        <TouchableOpacity
-                            style={styles.navButton}
-                            onPress={() => navigation.navigate('History')}>
-                            <Text style={styles.navButtonText}>📋 Historia</Text>
+                        <TouchableOpacity onPress={() => navigation.navigate('History')} style={styles.smallBtn}>
+                            <Text style={styles.smallBtnText}>Historia</Text>
                         </TouchableOpacity>
                     </View>
                 </View>
+
             </View>
         </View>
     );
 };
 
 const styles = StyleSheet.create({
-    container: {
-        flex: 1,
-        backgroundColor: '#000000',
-    },
-    overlay: {
-        ...StyleSheet.absoluteFillObject,
-        justifyContent: 'space-between',
-    },
-    topSection: {
+    container: { flex: 1, backgroundColor: 'black' },
+    overlay: { ...StyleSheet.absoluteFillObject, justifyContent: 'space-between' },
+
+    topBar: {
         paddingTop: 60,
-        paddingHorizontal: 20,
         alignItems: 'center',
     },
-    instructionText: {
-        color: '#FFFFFF',
-        fontSize: 16,
-        fontWeight: '500',
-        textAlign: 'center',
-        textShadowColor: 'rgba(0, 0, 0, 0.8)',
-        textShadowOffset: { width: 0, height: 1 },
-        textShadowRadius: 4,
-    },
-    middleSection: {
+    titleText: { color: 'white', fontSize: 24, fontWeight: 'bold', letterSpacing: 2 },
+    subText: { color: '#ccc', fontSize: 14, marginTop: 5 },
+
+    centerArea: {
         flex: 1,
         justifyContent: 'center',
         alignItems: 'center',
     },
-    scanFrame: {
-        width: SCAN_FRAME_WIDTH,
-        height: SCAN_FRAME_HEIGHT,
-        borderWidth: 2,
-        borderColor: 'rgba(59, 130, 246, 0.5)',
-        borderRadius: 8,
+    guideBox: {
+        width: GUIDE_BOX_WIDTH,
+        height: GUIDE_BOX_HEIGHT,
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.3)',
+        borderRadius: 12,
         justifyContent: 'center',
         alignItems: 'center',
     },
     corner: {
         position: 'absolute',
-        width: 24,
-        height: 24,
-        borderColor: '#3B82F6',
+        width: 20,
+        height: 20,
+        borderColor: '#00D1FF', // Cyan accent
         borderWidth: 3,
     },
-    topLeft: {
-        top: -2,
-        left: -2,
-        borderRightWidth: 0,
-        borderBottomWidth: 0,
-        borderTopLeftRadius: 8,
-    },
-    topRight: {
-        top: -2,
-        right: -2,
-        borderLeftWidth: 0,
-        borderBottomWidth: 0,
-        borderTopRightRadius: 8,
-    },
-    bottomLeft: {
-        bottom: -2,
-        left: -2,
-        borderRightWidth: 0,
-        borderTopWidth: 0,
-        borderBottomLeftRadius: 8,
-    },
-    bottomRight: {
-        bottom: -2,
-        right: -2,
-        borderLeftWidth: 0,
-        borderTopWidth: 0,
-        borderBottomRightRadius: 8,
-    },
-    scanningIndicator: {
-        backgroundColor: 'rgba(255, 255, 255, 0.9)',
-        borderRadius: 20,
-        padding: 8,
-    },
-    bottomSection: {
+    tl: { top: -2, left: -2, borderRightWidth: 0, borderBottomWidth: 0, borderTopLeftRadius: 10 },
+    tr: { top: -2, right: -2, borderLeftWidth: 0, borderBottomWidth: 0, borderTopRightRadius: 10 },
+    bl: { bottom: -2, left: -2, borderRightWidth: 0, borderTopWidth: 0, borderBottomLeftRadius: 10 },
+    br: { bottom: -2, right: -2, borderLeftWidth: 0, borderTopWidth: 0, borderBottomRightRadius: 10 },
+    loader: { transform: [{ scale: 1.5 }] },
+
+    bottomBar: {
         paddingBottom: 40,
-        paddingHorizontal: 20,
         alignItems: 'center',
-    },
-    statusContainer: {
-        backgroundColor: 'rgba(0, 0, 0, 0.7)',
-        paddingHorizontal: 20,
-        paddingVertical: 10,
-        borderRadius: 20,
-        marginBottom: 20,
+        backgroundColor: 'rgba(0,0,0,0.4)',
+        paddingTop: 20,
     },
     statusText: {
-        color: '#FFFFFF',
-        fontSize: 14,
-        fontWeight: '500',
-        textAlign: 'center',
-    },
-    scanButton: {
-        backgroundColor: '#3B82F6',
-        paddingHorizontal: 60,
-        paddingVertical: 18,
-        borderRadius: 30,
-        shadowColor: '#3B82F6',
-        shadowOffset: { width: 0, height: 4 },
-        shadowOpacity: 0.4,
-        shadowRadius: 8,
-        elevation: 5,
+        color: 'white',
         marginBottom: 20,
-    },
-    scanButtonActive: {
-        backgroundColor: '#EF4444',
-        shadowColor: '#EF4444',
-    },
-    scanButtonText: {
-        color: '#FFFFFF',
-        fontSize: 20,
-        fontWeight: '700',
-        letterSpacing: 2,
-    },
-    navContainer: {
-        flexDirection: 'row',
-        justifyContent: 'center',
-        gap: 16,
-    },
-    navButton: {
-        backgroundColor: 'rgba(255, 255, 255, 0.15)',
-        paddingHorizontal: 20,
-        paddingVertical: 12,
-        borderRadius: 10,
-        borderWidth: 1,
-        borderColor: 'rgba(255, 255, 255, 0.25)',
-    },
-    navButtonText: {
-        color: '#FFFFFF',
-        fontSize: 15,
+        fontSize: 16,
         fontWeight: '600',
     },
-    permissionContainer: {
-        flex: 1,
+    scanBtn: {
+        width: 80,
+        height: 80,
+        borderRadius: 40,
         justifyContent: 'center',
         alignItems: 'center',
-        padding: 40,
-        backgroundColor: '#1A1A1A',
+        borderWidth: 4,
+        borderColor: 'white',
+        marginBottom: 20,
+        shadowColor: "#000",
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.3,
+        shadowRadius: 4,
+        elevation: 5,
     },
-    permissionTitle: {
-        fontSize: 22,
-        fontWeight: '700',
-        color: '#FFFFFF',
-        marginBottom: 16,
-        textAlign: 'center',
+    startBtn: { backgroundColor: '#3B82F6' }, // Blue
+    stopBtn: { backgroundColor: '#EF4444' }, // Red
+    scanBtnText: { color: 'white', fontWeight: 'bold', fontSize: 12 },
+
+    navRow: {
+        flexDirection: 'row',
+        width: '100%',
+        justifyContent: 'space-evenly',
     },
-    permissionText: {
+    smallBtn: {
+        padding: 10,
+    },
+    smallBtnText: {
+        color: '#ccc',
         fontSize: 16,
-        color: '#9CA3AF',
-        textAlign: 'center',
-        marginBottom: 32,
-        lineHeight: 24,
     },
-    permissionButton: {
-        backgroundColor: '#3B82F6',
-        paddingHorizontal: 32,
-        paddingVertical: 14,
-        borderRadius: 10,
-    },
-    permissionButtonText: {
-        color: '#FFFFFF',
-        fontSize: 16,
-        fontWeight: '600',
-    },
-    errorText: {
-        color: '#EF4444',
-        fontSize: 18,
-        textAlign: 'center',
-    },
+    permButton: { backgroundColor: '#333', padding: 20, marginTop: 20, borderRadius: 8 }
 });
 
 export default HomeScreen;
