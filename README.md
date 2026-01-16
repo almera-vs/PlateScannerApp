@@ -15,7 +15,7 @@ A React Native Android application for scanning and managing license plates usin
 - React Native CLI 0.83+
 - TypeScript
 - react-native-vision-camera (Camera)
-- react-native-text-recognition (OCR)
+- @react-native-ml-kit/text-recognition (OCR)
 - @op-engineering/op-sqlite (Database)
 - React Navigation (Navigation)
 - GitHub Actions (CI/CD)

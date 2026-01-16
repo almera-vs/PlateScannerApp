@@ -14,7 +14,7 @@ import {
     useCameraPermission,
     PhotoFile,
 } from 'react-native-vision-camera';
-import TextRecognition from 'react-native-text-recognition';
+import TextRecognition from '@react-native-ml-kit/text-recognition';
 import { useIsFocused, useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { format } from 'date-fns';
@@ -102,10 +102,13 @@ export const HomeScreen: React.FC = () => {
                 flash: 'off',
             });
 
-            // Perform OCR
-            const recognizedTexts = await TextRecognition.recognize(
+            // Perform OCR using ML Kit
+            const result = await TextRecognition.recognize(
                 `file://${photo.path}`,
             );
+
+            // Extract text blocks from ML Kit result
+            const recognizedTexts = result.blocks.map(block => block.text);
 
             // Find valid plate
             const plateNumber = await processRecognizedText(recognizedTexts);
