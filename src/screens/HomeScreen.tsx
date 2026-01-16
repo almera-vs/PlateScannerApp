@@ -15,7 +15,7 @@ import {
     useCameraPermission,
     PhotoFile,
 } from 'react-native-vision-camera';
-import TextRecognition from '@react-native-ml-kit/text-recognition';
+import TextRecognition, { TextBlock } from '@react-native-ml-kit/text-recognition';
 import { useIsFocused, useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { format } from 'date-fns';
@@ -30,16 +30,9 @@ const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const SCAN_FRAME_WIDTH = SCREEN_WIDTH - 60;
 const SCAN_FRAME_HEIGHT = 120;
 
-// EU License plate patterns - more flexible for European plates
-// Polish: 2-3 letters + 4-5 alphanumeric (e.g., WZ 12345, DW 1AB23)
-// German: 1-3 letters + 1-2 letters + 1-4 numbers (e.g., B AB 123)
-// Standard EU: 1-3 region + space + 3-6 alphanumeric
-const PLATE_PATTERNS = [
-    /^[A-Z]{2,3}\s?[A-Z0-9]{4,5}$/,     // Polish standard
-    /^[A-Z]{1,3}\s?[A-Z]{1,2}\s?[0-9]{1,4}[A-Z]?$/,  // German style
-    /^[A-Z0-9]{5,8}$/,                   // Generic 5-8 alphanumeric
-    /^[A-Z]{1,2}\s?[0-9]{2,4}\s?[A-Z]{2,3}$/,  // UK style
-];
+// Strict License Plate Regex (User requested)
+// Format: 2-3 letters, then 4-5 alphanumeric (e.g. WZ12345, DW1A123)
+const STRICT_PLATE_REGEX = /^[A-Z]{2,3}[0-9A-Z]{4,5}$/;
 
 // Minimum interval between scans in ms
 const SCAN_DEBOUNCE_MS = 2000;
@@ -67,57 +60,68 @@ export const HomeScreen: React.FC = () => {
         }
     }, []);
 
-    const validatePlate = useCallback((text: string): string | null => {
-        // Normalize: uppercase, keep spaces for multi-part plates
-        const normalized = text.toUpperCase().replace(/[^A-Z0-9\s]/g, '').trim();
-
-        // Skip if too short or too long
-        if (normalized.length < 5 || normalized.length > 10) {
-            return null;
-        }
-
-        // Check against multiple EU patterns
-        for (const pattern of PLATE_PATTERNS) {
-            if (pattern.test(normalized)) {
-                // Return without spaces for DB storage
-                return normalized.replace(/\s/g, '');
-            }
-        }
-
-        return null;
-    }, []);
-
     const processRecognizedText = useCallback(
-        (recognizedTexts: string[]): string | null => {
-            // Find valid plates from recognized text blocks
-            for (const text of recognizedTexts) {
-                // Split text by common separators and check each segment
-                const segments = text.split(/[\n\r\t,;|]+/);
-                for (const segment of segments) {
-                    const words = segment.trim().split(/\s+/);
+        (textBlocks: TextBlock[], photoWidth: number, photoHeight: number): string | null => {
+            // DEBUG: Log image dimensions
+            console.log(`Processing Frame: ${photoWidth}x${photoHeight}`);
 
-                    // Try combining adjacent words (for "WZ 12345" style plates)
-                    for (let i = 0; i < words.length; i++) {
-                        // Single word
-                        const validPlate = validatePlate(words[i]);
-                        if (validPlate) {
-                            return validPlate;
-                        }
+            // ROI Constants (Middle 50% of screen)
+            const MIN_Y = photoHeight * 0.25;
+            const MAX_Y = photoHeight * 0.75;
+            const MIN_X = photoWidth * 0.1; // Ignore edges
+            const MAX_X = photoWidth * 0.9;
 
-                        // Two adjacent words
-                        if (i < words.length - 1) {
-                            const combined = words[i] + ' ' + words[i + 1];
-                            const validCombined = validatePlate(combined);
-                            if (validCombined) {
-                                return validCombined;
-                            }
+            for (const block of textBlocks) {
+                if (!block.frame) {
+                    continue;
+                }
+
+                // Log raw block text and coordinates
+                // frame usually has properties: left, top, width, height (or x,y depending on version, checking both safely)
+                const frame: any = block.frame;
+                const x = frame.x ?? frame.left ?? 0;
+                const y = frame.y ?? frame.top ?? 0;
+
+                console.log(`Block: "${block.text}" [${x}, ${y}, ${frame.width}, ${frame.height}]`);
+
+                // 1. Coordinate Filtering (ROI)
+                const midX = x + (frame.width / 2);
+                const midY = y + (frame.height / 2);
+
+                const isCentral = midY > MIN_Y && midY < MAX_Y && midX > MIN_X && midX < MAX_X;
+
+                if (!isCentral) {
+                    console.log(`Skipped block "${block.text}" - Outside ROI`);
+                    continue;
+                }
+
+                // 2. Normalization
+                // Strip everything except A-Z and 0-9
+                const rawText = block.text;
+                const normalized = rawText.toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+                console.log(`Normalized: "${normalized}"`);
+
+                // 3. Strict Regex Matching
+                if (STRICT_PLATE_REGEX.test(normalized)) {
+                    console.log(`MATCH FOUND: ${normalized}`);
+                    return normalized;
+                } else {
+                    // Retry with line splitting if the block contains multiple lines
+                    // (Though usually blocks are paragraphs/lines, ML Kit can return large blocks)
+                    const lines = block.text.split('\n');
+                    for (const line of lines) {
+                        const lineNorm = line.toUpperCase().replace(/[^A-Z0-9]/g, '');
+                        if (STRICT_PLATE_REGEX.test(lineNorm)) {
+                            console.log(`MATCH FOUND (in line): ${lineNorm}`);
+                            return lineNorm;
                         }
                     }
                 }
             }
             return null;
         },
-        [validatePlate],
+        [],
     );
 
     const handlePlateDetected = useCallback(
@@ -227,16 +231,13 @@ export const HomeScreen: React.FC = () => {
             // Perform OCR using ML Kit
             const result = await TextRecognition.recognize(`file://${photo.path}`);
 
-            // Extract text blocks from ML Kit result
-            const recognizedTexts = result.blocks.map(block => block.text);
-
-            // Find valid plate
-            const plateNumber = processRecognizedText(recognizedTexts);
+            // Process with ROI and Strict Regex
+            const plateNumber = processRecognizedText(result.blocks, photo.width, photo.height);
 
             if (plateNumber) {
                 await handlePlateDetected(plateNumber);
             } else {
-                setStatusMessage('Szukam tablicy... skieruj kamerę na tablicę');
+                setStatusMessage('Szukam tablicy...');
             }
         } catch (error) {
             console.error('Capture/OCR error:', error);
@@ -324,6 +325,7 @@ export const HomeScreen: React.FC = () => {
                 device={device}
                 isActive={isFocused}
                 photo={true}
+                zoom={device.neutralZoom ? device.neutralZoom * 3 : 3.0} // Zoom 3x to focus on plate
             />
 
             {/* Overlay */}
