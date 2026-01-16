@@ -1,45 +1,74 @@
 /**
- * Sample React Native App
- * https://github.com/facebook/react-native
- *
- * @format
+ * PlateScannerApp - License Plate Scanner
+ * React Native application for scanning and managing license plates
  */
 
-import { NewAppScreen } from '@react-native/new-app-screen';
-import { StatusBar, StyleSheet, useColorScheme, View } from 'react-native';
-import {
-  SafeAreaProvider,
-  useSafeAreaInsets,
-} from 'react-native-safe-area-context';
+import React, { useEffect } from 'react';
+import { StatusBar } from 'react-native';
+import { NavigationContainer } from '@react-navigation/native';
+import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 
-function App() {
-  const isDarkMode = useColorScheme() === 'dark';
+import HomeScreen from './src/screens/HomeScreen';
+import ManualEntryScreen from './src/screens/ManualEntryScreen';
+import HistoryScreen from './src/screens/HistoryScreen';
+import { RootStackParamList } from './src/types';
+import db from './src/services/db';
+
+const Stack = createNativeStackNavigator<RootStackParamList>();
+
+function App(): React.JSX.Element {
+  useEffect(() => {
+    // Initialize database on app start
+    db.initDB().catch(error => {
+      console.error('Failed to initialize database:', error);
+    });
+  }, []);
 
   return (
     <SafeAreaProvider>
-      <StatusBar barStyle={isDarkMode ? 'light-content' : 'dark-content'} />
-      <AppContent />
+      <NavigationContainer>
+        <StatusBar barStyle="light-content" backgroundColor="#1A1A1A" />
+        <Stack.Navigator
+          initialRouteName="Home"
+          screenOptions={{
+            headerStyle: {
+              backgroundColor: '#1A1A1A',
+            },
+            headerTintColor: '#FFFFFF',
+            headerTitleStyle: {
+              fontWeight: '600',
+            },
+            animation: 'slide_from_right',
+          }}>
+          <Stack.Screen
+            name="Home"
+            component={HomeScreen}
+            options={{
+              title: 'Skaner Tablic',
+              headerShown: false,
+            }}
+          />
+          <Stack.Screen
+            name="ManualEntry"
+            component={ManualEntryScreen}
+            options={{
+              title: 'Wprowadź ręcznie',
+              presentation: 'modal',
+            }}
+          />
+          <Stack.Screen
+            name="History"
+            component={HistoryScreen}
+            options={{
+              title: 'Historia',
+              headerShown: false,
+            }}
+          />
+        </Stack.Navigator>
+      </NavigationContainer>
     </SafeAreaProvider>
   );
 }
-
-function AppContent() {
-  const safeAreaInsets = useSafeAreaInsets();
-
-  return (
-    <View style={styles.container}>
-      <NewAppScreen
-        templateFileName="App.tsx"
-        safeAreaInsets={safeAreaInsets}
-      />
-    </View>
-  );
-}
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-  },
-});
 
 export default App;
