@@ -16,8 +16,7 @@ import {
     useCameraPermission,
     PhotoFile,
 } from 'react-native-vision-camera';
-import TextRecognition from '@react-native-ml-kit/text-recognition';
-import ImageEditor from '@react-native-community/image-editor';
+import TextRecognition, { TextBlock } from '@react-native-ml-kit/text-recognition';
 import RNFS from 'react-native-fs';
 import { useIsFocused, useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -66,9 +65,6 @@ export const HomeScreen: React.FC = () => {
     const handlePlateDetected = useCallback(
         async (plateNumber: string) => {
             // Normalize: Remove spaces for DB check/save depending on requirement
-            // Display format: Keep spaces if regex matched with spaces? 
-            // User regex: /^[A-Z]{2,3}\s?[0-9A-Z]{4,5}$/ (optional space)
-            // Let's normalize to no-space for DB consistency
             const dbPlate = plateNumber.replace(/\s/g, '');
 
             if (dbPlate === lastScannedPlate) return;
@@ -135,104 +131,75 @@ export const HomeScreen: React.FC = () => {
         [lastScannedPlate],
     );
 
-    const captureAndCrop = useCallback(async () => {
+    const captureAndProcess = useCallback(async () => {
         if (!camera.current || !isScanning || isProcessing) return;
 
         setIsProcessing(true);
         setStatusMessage('Przetwarzanie...');
 
         let originalPhotoPath: string | null = null;
-        let croppedPhotoPath: string | null = null;
 
         try {
             // A) Snapshot
             const photo = await camera.current.takePhoto({
                 flash: 'off',
-                enableShutterSound: false, // Try to silence if possible
+                enableShutterSound: false,
             });
             originalPhotoPath = photo.path;
 
-            // B) Calculate Crop
-            // We want the center area corresponding to the Guide Box
-            // Guide Box is vertically centered, height = 150
-            // Guide Box is horizontally centered, width = 80%
+            // B) OCR on Full Image
+            const result = await TextRecognition.recognize(`file://${originalPhotoPath}`);
 
-            // Image coords
+            // C) ROI Filtering (Logical Crop)
+            // Filter text blocks based on their position in the image
+            // We want blocks that are roughly in the center (where the Guide Box is)
             const imgW = photo.width;
             const imgH = photo.height;
 
-            // Calculate crop region (normalized to image dimensions)
-            // Vertical center:
-            // The Guide Box UI is at screen center.
-            // We assume the camera preview fills the screen (cover).
-            // So the crop area relative to image is proportional to GuideBox relative to Screen.
+            // Guide Box logic:
+            // Width: 80% centered -> 10% from left to 90% from left
+            // Height: Fixed 150px at center. On screen, 150px is a fraction of SCREEN_HEIGHT.
+            // We should map this fraction to image height.
+            const guideBoxScreenFractionH = GUIDE_BOX_HEIGHT / SCREEN_HEIGHT;
+            // To be safe, let's use a slightly larger vertical area (e.g. 20% or 30%)
+            const ROI_H_PERCENT = Math.max(0.2, guideBoxScreenFractionH * 1.5);
 
-            // NOTE: Handling aspect ratio differences between Screen and Camera Sensor is complex.
-            // For simplicity, we implement the User's formula: "offset_y = height * 0.4", "height = 0.2"
-            // User Formula:
-            // offset_x = imageWidth * 0.1 (to match 80% width centered)
-            // crop_width = imageWidth * 0.8
-            // offset_y = imageHeight * 0.4 (approx middle)
-            // crop_height = imageHeight * 0.2
+            const MIN_Y = imgH * (0.5 - ROI_H_PERCENT / 2);
+            const MAX_Y = imgH * (0.5 + ROI_H_PERCENT / 2);
+            const MIN_X = imgW * 0.05; // Ignore very edges
+            const MAX_X = imgW * 0.95;
 
-            const cropData = {
-                offset: {
-                    x: imgW * ((1 - GUIDE_BOX_WIDTH_PERCENT) / 2), // 10% from left
-                    y: imgH * 0.4, // Start at 40% height
-                },
-                size: {
-                    width: imgW * GUIDE_BOX_WIDTH_PERCENT, // 80% width
-                    height: imgH * 0.2, // 20% height
-                },
-                displaySize: {
-                    width: imgW * GUIDE_BOX_WIDTH_PERCENT,
-                    height: imgH * 0.2
-                },
-                resizeMode: 'contain' as const,
-            };
-
-            // C) Crop
-            const resultObj = await ImageEditor.cropImage(`file://${originalPhotoPath}`, cropData);
-            // ImageEditor returns { path: string, width: number, height: number } or similar depending on version
-            // Checking type defs or docs: It returns Promise<CropResult> which has 'path' or 'uri'
-            // If resultObj is string (some versions), use it. If object, use .path or .uri
-            const uri = (typeof resultObj === 'string') ? resultObj : (resultObj as any).path ?? (resultObj as any).uri;
-            croppedPhotoPath = uri;
-
-            // D) OCR on Cropped Image
-            const result = await TextRecognition.recognize(uri);
-
-            // E) Filter
             let foundPlate: string | null = null;
 
-            // Check full blocks first
             for (const block of result.blocks) {
-                const text = block.text.trim().toUpperCase().replace(/[^A-Z0-9]/g, ''); // Basic normalization
-                // Check strict regex
-                // We need to re-verify regex logic. 
-                // If regex allows space /^[A-Z]{2,3}\s?[0-9A-Z]{4,5}$/
-                // Then we shouldn't strip space in temp text completely if we want to match exact regex
-                // But usually trimming non-alphanumeric is safer for noisy OCR.
-                // Let's strip special chars but try to match the pattern structure A-Z then 0-9
+                if (!block.frame) continue;
 
+                const frame: any = block.frame;
+                const x = frame.x ?? frame.left ?? 0;
+                const y = frame.y ?? frame.top ?? 0;
+                const w = frame.width;
+                const h = frame.height;
+
+                const midX = x + w / 2;
+                const midY = y + h / 2;
+
+                // Check if center of block is inside ROI
+                const isInside = midY > MIN_Y && midY < MAX_Y && midX > MIN_X && midX < MAX_X;
+
+                if (!isInside) {
+                    // Logically cropped out
+                    continue;
+                }
+
+                // D) Regex Check
+                const text = block.text.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
                 if (STRICT_PLATE_REGEX.test(text)) {
                     foundPlate = text;
                     break;
                 }
             }
 
-            // If not found in blocks, try line by line
-            if (!foundPlate) {
-                // Flatten all text
-                const allText = result.text.toUpperCase().replace(/[^A-Z0-9\s]/g, '');
-                const words = allText.split(/\s+/);
-                for (const w of words) {
-                    if (STRICT_PLATE_REGEX.test(w)) {
-                        foundPlate = w;
-                        break;
-                    }
-                }
-            }
+            // If not found in blocks, try specific words in ROI (if needed) - Keeping simple for now
 
             if (foundPlate) {
                 await handlePlateDetected(foundPlate);
@@ -247,12 +214,7 @@ export const HomeScreen: React.FC = () => {
         } finally {
             setIsProcessing(false);
 
-            // Cleanup
-            if (croppedPhotoPath) {
-                RNFS.unlink(croppedPhotoPath).catch(() => { });
-            }
-            // Note: originalPhotoPath is managed by Camera lib (cache), usually cleaned up by OS eventually,
-            // but we can delete it if we want to be strict.
+            // Cleanup original photo
             if (originalPhotoPath) {
                 RNFS.unlink(originalPhotoPath).catch(() => { });
             }
@@ -264,11 +226,11 @@ export const HomeScreen: React.FC = () => {
         let interval: ReturnType<typeof setInterval>;
         if (isScanning && !isProcessing && isFocused && hasPermission) {
             interval = setInterval(() => {
-                captureAndCrop();
+                captureAndProcess();
             }, SNAPSHOT_INTERVAL_MS);
         }
         return () => clearInterval(interval);
-    }, [isScanning, isProcessing, isFocused, hasPermission, captureAndCrop]);
+    }, [isScanning, isProcessing, isFocused, hasPermission, captureAndProcess]);
 
 
     const toggleScanning = () => {
@@ -302,11 +264,6 @@ export const HomeScreen: React.FC = () => {
                 device={device}
                 isActive={isFocused}
                 photo={true}
-                // Use user requested zoom strategy: Neutral * 2 or just 2.0
-                // "set the default zoom property to 2.0 (or device.neutralZoom * 2)" from Prompt 1
-                // Prompt 2: "device.neutralZoom * 3"
-                // Prompt 3 (this one): "Refactor... logic". Doesn't explicitly mention zoom change, but implies standard setup.
-                // I will keep 2.0 or 3.0. Let's stick to 2.0 for "Guide Box" strategy (snapshot usually high res).
                 zoom={device.neutralZoom ? device.neutralZoom * 2 : 2.0}
             />
 
