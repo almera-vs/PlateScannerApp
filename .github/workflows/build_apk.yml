@@ -57,6 +57,7 @@ jobs:
           MYAPP_UPLOAD_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           cd android
+          ./gradlew clean
           ./gradlew assembleRelease --no-daemon --build-cache --configuration-cache
 
       - name: Upload APK Artifact
