@@ -8,10 +8,10 @@ import {
     Alert,
     TouchableOpacity,
     Platform,
+    Share, // Built-in Share API
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import RNFS from 'react-native-fs';
-import Clipboard from '@react-native-clipboard/clipboard';
 import { format } from 'date-fns';
 import { pl } from 'date-fns/locale';
 
@@ -59,15 +59,23 @@ export const HistoryScreen: React.FC = () => {
             .join('\n');
     };
 
-    const handleCopyToClipboard = () => {
+    const handleShareData = async () => {
         if (plates.length === 0) {
-            Alert.alert('Pusto', 'Brak danych do skopiowania');
+            Alert.alert('Pusto', 'Brak danych do udostępnienia');
             return;
         }
 
         const data = formatPlatesData();
-        Clipboard.setString(data);
-        Alert.alert('Skopiowano', 'Wszystkie tablice zostały skopiowane do schowka.');
+
+        try {
+            await Share.share({
+                message: data,
+                title: 'Historia sprawdzonych tablic'
+            });
+            // Result handling is optional
+        } catch (error) {
+            Alert.alert('Błąd', 'Nie udało się udostępnić danych');
+        }
     };
 
     const handleExportTxt = async () => {
@@ -77,17 +85,10 @@ export const HistoryScreen: React.FC = () => {
         }
 
         const data = formatPlatesData();
-        // Path: Documents folder or Download folder
-        // On Android, Download is better for user visibility, but requires scoped storage permission sometimes.
-        // Let's try ExternalDirectoryPath or DocumentDirectoryPath.
-        // For simplicity and permission safety, use DocumentDirectoryPath (internal app storage visible to user if explicit)
-        // OR ExternalDirectoryPath.
-
-        // Let's try standard Documents path.
         const fileName = `tablice_export_${Date.now()}.txt`;
         const path = Platform.select({
             ios: `${RNFS.DocumentDirectoryPath}/${fileName}`,
-            android: `${RNFS.ExternalDirectoryPath}/${fileName}`, // Usually /storage/emulated/0/Android/data/com.app/files/
+            android: `${RNFS.ExternalDirectoryPath}/${fileName}`,
         });
 
         if (!path) return;
@@ -166,9 +167,12 @@ export const HistoryScreen: React.FC = () => {
 
                 {/* Action Buttons Row */}
                 <View style={styles.actionRow}>
-                    <TouchableOpacity style={styles.actionBtn} onPress={handleCopyToClipboard}>
-                        <Text style={styles.actionBtnText}>📋 Kopiuj</Text>
+                    {/* Share / Copy Button */}
+                    <TouchableOpacity style={styles.actionBtn} onPress={handleShareData}>
+                        <Text style={styles.actionBtnText}>� Udostępnij / Kopiuj</Text>
                     </TouchableOpacity>
+
+                    {/* Export File Button */}
                     <TouchableOpacity style={[styles.actionBtn, styles.exportBtn]} onPress={handleExportTxt}>
                         <Text style={styles.actionBtnText}>💾 Eksportuj .txt</Text>
                     </TouchableOpacity>
@@ -222,14 +226,17 @@ const styles = StyleSheet.create({
         flexDirection: 'row',
         marginTop: 16,
         gap: 12,
+        flexWrap: 'wrap', // Allow wrapping on small screens
     },
     actionBtn: {
         backgroundColor: '#333',
-        paddingVertical: 8,
+        paddingVertical: 10,
         paddingHorizontal: 16,
         borderRadius: 8,
         borderWidth: 1,
         borderColor: '#444',
+        flexDirection: 'row',
+        alignItems: 'center',
     },
     exportBtn: {
         backgroundColor: '#3B82F6', // Blue for primary action
