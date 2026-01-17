@@ -29,6 +29,7 @@ class DatabaseService {
                 name: DATABASE_NAME,
             });
 
+            // Version 1 Table
             this.db.executeSync(`
         CREATE TABLE IF NOT EXISTS plates (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -38,6 +39,20 @@ class DatabaseService {
         )
       `);
 
+            // Migration: Add scan_count and last_scan_date if they don't exist
+            // SQLite doesn't support IF NOT EXISTS for columns, so we try/catch or check PRAGMA table_info
+            // Simple approach: Try to add, ignore error if duplicate column
+            try {
+                this.db.executeSync(`ALTER TABLE plates ADD COLUMN scan_count INTEGER DEFAULT 1`);
+            } catch (e) { /* Column likely exists */ }
+
+            try {
+                this.db.executeSync(`ALTER TABLE plates ADD COLUMN last_scan_date TEXT`);
+            } catch (e) { /* Column likely exists */ }
+
+            // Backfill last_scan_date for old records if null
+            this.db.executeSync(`UPDATE plates SET last_scan_date = scan_date WHERE last_scan_date IS NULL`);
+
             console.log('Database initialized successfully');
         } catch (error) {
             console.error('Failed to initialize database:', error);
@@ -46,44 +61,63 @@ class DatabaseService {
     }
 
     /**
-     * Add a new plate to the database
+     * Add a newplate to the database OR update existing
      * @param plateNumber - The license plate number
      * @param isManual - Whether the plate was entered manually
-     * @returns The inserted plate or null if duplicate
+     * @param forceUpdate - If true, increments count even if exists
+     * @returns The inserted/updated plate or null if duplicate (and forceUpdate false)
      */
-    public addPlate(plateNumber: string, isManual: boolean): Plate | null {
+    public addPlate(plateNumber: string, isManual: boolean, forceUpdate: boolean = false): Plate | null {
         try {
             if (!this.db) {
                 this.initDB();
             }
 
             const normalizedPlate = plateNumber.toUpperCase().trim();
-            const scanDate = new Date().toISOString();
+            const now = new Date().toISOString();
 
+            // Check existence first
+            const existing = this.checkPlate(normalizedPlate);
+
+            if (existing.exists && existing.plate) {
+                if (forceUpdate) {
+                    // UPDATE existing record
+                    const newCount = (existing.plate.scan_count || 1) + 1;
+                    this.db!.executeSync(
+                        `UPDATE plates SET scan_count = ?, last_scan_date = ?, is_manual = ? WHERE id = ?`,
+                        [newCount, now, isManual ? 1 : 0, existing.plate.id]
+                    );
+                    return {
+                        ...existing.plate,
+                        scan_count: newCount,
+                        last_scan_date: now,
+                        is_manual: isManual // Update source type to latest
+                    };
+                } else {
+                    // Return null to signal duplicate (unless caller handles it)
+                    return null;
+                }
+            }
+
+            // INSERT new record
             const result = this.db!.executeSync(
-                `INSERT INTO plates (plate_number, scan_date, is_manual) VALUES (?, ?, ?)`,
-                [normalizedPlate, scanDate, isManual ? 1 : 0],
+                `INSERT INTO plates (plate_number, scan_date, last_scan_date, is_manual, scan_count) VALUES (?, ?, ?, ?, 1)`,
+                [normalizedPlate, now, now, isManual ? 1 : 0],
             );
 
             if (result.insertId) {
                 return {
                     id: result.insertId,
                     plate_number: normalizedPlate,
-                    scan_date: scanDate,
+                    scan_date: now,
+                    last_scan_date: now,
                     is_manual: isManual,
+                    scan_count: 1
                 };
             }
 
             return null;
         } catch (error: any) {
-            // Handle unique constraint violation (duplicate plate)
-            if (
-                error?.message?.includes('UNIQUE constraint failed') ||
-                error?.message?.includes('SQLITE_CONSTRAINT')
-            ) {
-                console.log('Duplicate plate detected:', plateNumber);
-                return null;
-            }
             console.error('Failed to add plate:', error);
             throw error;
         }
@@ -103,7 +137,7 @@ class DatabaseService {
             const normalizedPlate = plateNumber.toUpperCase().trim();
 
             const result = this.db!.executeSync(
-                `SELECT id, plate_number, scan_date, is_manual FROM plates WHERE plate_number = ?`,
+                `SELECT * FROM plates WHERE plate_number = ?`,
                 [normalizedPlate],
             );
 
@@ -115,7 +149,9 @@ class DatabaseService {
                         id: row.id,
                         plate_number: row.plate_number,
                         scan_date: row.scan_date,
+                        last_scan_date: row.last_scan_date || row.scan_date,
                         is_manual: row.is_manual === 1,
+                        scan_count: row.scan_count || 1
                     },
                 };
             }
@@ -128,7 +164,7 @@ class DatabaseService {
     }
 
     /**
-     * Get all plates from the database ordered by scan_date DESC
+     * Get all plates from the database ordered by last_scan_date DESC
      * @returns Array of all plates
      */
     public getAllPlates(): Plate[] {
@@ -138,7 +174,7 @@ class DatabaseService {
             }
 
             const result = this.db!.executeSync(
-                `SELECT id, plate_number, scan_date, is_manual FROM plates ORDER BY scan_date DESC`,
+                `SELECT * FROM plates ORDER BY last_scan_date DESC`,
             );
 
             const plates: Plate[] = [];
@@ -148,7 +184,9 @@ class DatabaseService {
                         id: row.id,
                         plate_number: row.plate_number,
                         scan_date: row.scan_date,
+                        last_scan_date: row.last_scan_date || row.scan_date,
                         is_manual: row.is_manual === 1,
+                        scan_count: row.scan_count || 1
                     });
                 }
             }

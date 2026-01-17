@@ -4,7 +4,9 @@ export interface Plate {
     id: number;
     plate_number: string;
     scan_date: string;
+    last_scan_date?: string; // New: updated on re-scan
     is_manual: boolean;
+    scan_count?: number; // New: frequency counter
 }
 
 export type PlateInput = Omit<Plate, 'id'>;

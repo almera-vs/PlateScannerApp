@@ -16,6 +16,9 @@ export const PlateItem: React.FC<PlateItemProps> = ({ plate, onDelete }) => {
             <View style={styles.plateContainer}>
                 <Text style={styles.plateNumber}>{plate.plate_number}</Text>
                 {plate.is_manual && <Text style={styles.manualBadge}>MANUAL</Text>}
+                {plate.scan_count && plate.scan_count > 1 && (
+                    <Text style={styles.countBadge}>x{plate.scan_count}</Text>
+                )}
             </View>
             <View style={styles.infoContainer}>
                 <Text style={styles.dateText}>{formattedDate}</Text>
@@ -64,6 +67,17 @@ const styles = StyleSheet.create({
         paddingHorizontal: 8,
         paddingVertical: 4,
         borderRadius: 4,
+        overflow: 'hidden',
+    },
+    countBadge: {
+        marginLeft: 8,
+        backgroundColor: '#F59E0B', // Amber
+        color: '#FFFFFF',
+        fontSize: 12,
+        fontWeight: 'bold',
+        paddingHorizontal: 8,
+        paddingVertical: 4,
+        borderRadius: 12,
         overflow: 'hidden',
     },
     infoContainer: {

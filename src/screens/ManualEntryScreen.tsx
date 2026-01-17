@@ -15,8 +15,8 @@ import { pl } from 'date-fns/locale';
 
 import db from '../services/db';
 
-// License plate regex pattern (5-8 alphanumeric characters)
-const PLATE_REGEX = /^[A-Z0-9]{5,8}$/;
+// License plate regex pattern (3-15 alphanumeric characters)
+const PLATE_REGEX = /^[A-Z0-9]{3,15}$/;
 
 export const ManualEntryScreen: React.FC = () => {
     const navigation = useNavigation();
@@ -55,7 +55,7 @@ export const ManualEntryScreen: React.FC = () => {
         }
 
         if (!validatePlate(normalizedPlate)) {
-            setError('Nieprawidłowy format tablicy (5-8 znaków alfanumerycznych)');
+            setError('Nieprawidłowy format tablicy (3-15 znaków alfanumerycznych)');
             return;
         }
 
@@ -77,7 +77,24 @@ export const ManualEntryScreen: React.FC = () => {
                 Alert.alert(
                     '⚠️ DUPLIKAT!',
                     `Tablica ${normalizedPlate} już istnieje w bazie.\n\nZgłoszony: ${scanDate}`,
-                    [{ text: 'OK' }],
+                    [
+                        { text: 'OK', style: 'cancel' },
+                        {
+                            text: 'Zgłoś ponownie',
+                            onPress: async () => {
+                                await db.addPlate(normalizedPlate, true, true);
+                                Alert.alert('✅ ZAKTUALIZOWANO', 'Zwiększono licznik zgłoszeń.', [
+                                    {
+                                        text: 'OK',
+                                        onPress: () => {
+                                            setPlateNumber('');
+                                            navigation.goBack();
+                                        }
+                                    }
+                                ]);
+                            }
+                        }
+                    ],
                 );
             } else {
                 // NEW PLATE - Save to database
@@ -116,7 +133,7 @@ export const ManualEntryScreen: React.FC = () => {
             <View style={styles.content}>
                 <Text style={styles.title}>Wprowadź tablicę ręcznie</Text>
                 <Text style={styles.subtitle}>
-                    Wpisz numer tablicy rejestracyjnej (5-8 znaków)
+                    Wpisz numer tablicy rejestracyjnej (max 15 znaków)
                 </Text>
 
                 <View style={styles.inputContainer}>
@@ -126,7 +143,7 @@ export const ManualEntryScreen: React.FC = () => {
                         onChangeText={handleInputChange}
                         placeholder="NP. WZ12345"
                         placeholderTextColor="#9CA3AF"
-                        maxLength={8}
+                        maxLength={15}
                         autoCapitalize="characters"
                         autoCorrect={false}
                         autoComplete="off"

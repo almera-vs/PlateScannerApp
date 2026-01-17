@@ -36,7 +36,8 @@ const GUIDE_BOX_HEIGHT = 150;
 const GUIDE_BOX_WIDTH = SCREEN_WIDTH * GUIDE_BOX_WIDTH_PERCENT;
 
 // Explicit regex for license plate validation (Offline Mode)
-const STRICT_PLATE_REGEX = /^[A-Z]{2,3}\s?[0-9A-Z]{4,5}$/;
+// Relaxed to 3-15 characters as requested
+const STRICT_PLATE_REGEX = /^[A-Z0-9]{3,15}$/;
 
 // Interval for "Snapshot" loop
 const SNAPSHOT_INTERVAL_MS = 2000;
@@ -85,12 +86,31 @@ export const HomeScreen: React.FC = () => {
                     Alert.alert(
                         '⚠️ DUPLIKAT!',
                         `Tablica ${plateNumber} już istnieje.\nZgłoszony: ${scanDate}`,
-                        [{
-                            text: 'OK', onPress: () => {
-                                setLastScannedPlate(null);
-                                setStatusMessage('Naciśnij SKANUJ aby kontynuować');
+                        [
+                            {
+                                text: 'Anuluj',
+                                style: 'cancel',
+                                onPress: () => {
+                                    setLastScannedPlate(null);
+                                    setStatusMessage('Naciśnij SKANUJ aby kontynuować');
+                                }
+                            },
+                            {
+                                text: 'Zgłoś ponownie',
+                                style: 'default',
+                                onPress: () => {
+                                    // FORCE UPDATE
+                                    db.addPlate(dbPlate, false, true);
+                                    Alert.alert('✅ ZAKTUALIZOWANO', 'Zwiększono licznik zgłoszeń.', [{
+                                        text: 'OK',
+                                        onPress: () => {
+                                            setLastScannedPlate(null);
+                                            setStatusMessage('Gotowy.');
+                                        }
+                                    }]);
+                                }
                             }
-                        }],
+                        ],
                         { cancelable: false }
                     );
                 } else {
