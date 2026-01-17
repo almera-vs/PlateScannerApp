@@ -15,7 +15,7 @@ import {
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import RNFS from 'react-native-fs';
-import RNFS from 'react-native-fs';
+
 import { format } from 'date-fns';
 import { pl } from 'date-fns/locale';
 
