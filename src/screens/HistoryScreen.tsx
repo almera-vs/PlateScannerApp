@@ -15,7 +15,7 @@ import {
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import RNFS from 'react-native-fs';
-import DocumentPicker from 'react-native-document-picker';
+import RNFS from 'react-native-fs';
 import { format } from 'date-fns';
 import { pl } from 'date-fns/locale';
 
@@ -170,32 +170,6 @@ export const HistoryScreen: React.FC = () => {
         }
     };
 
-    const handleImportFile = async () => {
-        try {
-            const res = await DocumentPicker.pick({
-                type: [DocumentPicker.types.plainText],
-            });
-
-            if (res[0]) {
-                const fileUri = res[0].uri;
-                const content = await RNFS.readFile(fileUri, 'utf8');
-
-                Alert.alert(
-                    'Potwierdź import',
-                    `Czy dodać dane z pliku ${res[0].name}?`,
-                    [
-                        { text: 'Anuluj', style: 'cancel' },
-                        { text: 'Importuj', onPress: () => processImportedData(content) }
-                    ]
-                );
-            }
-        } catch (err) {
-            if (!DocumentPicker.isCancel(err)) {
-                Alert.alert('Błąd', 'Nie udało się wybrać pliku');
-            }
-        }
-    };
-
     const handleImportPaste = () => {
         setImportModalVisible(true);
     };
@@ -253,12 +227,8 @@ export const HistoryScreen: React.FC = () => {
                 </View>
 
                 <View style={styles.actionRow}>
-                    <TouchableOpacity style={[styles.actionBtn, styles.importBtn]} onPress={handleImportFile}>
-                        <Text style={styles.actionBtnText}>📂 Import (Plik)</Text>
-                    </TouchableOpacity>
-
                     <TouchableOpacity style={[styles.actionBtn, styles.importBtn]} onPress={handleImportPaste}>
-                        <Text style={styles.actionBtnText}>📂 Import (Wklej)</Text>
+                        <Text style={styles.actionBtnText}>📂 Import (Wklej / Plik)</Text>
                     </TouchableOpacity>
                 </View>
             </View>
